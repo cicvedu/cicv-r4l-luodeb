@@ -1,3 +1,5 @@
+我的博客：<https://www.luodeb.top/2ed0cc28/>
+
 # 作业1 编译内核
 
 ```bash
