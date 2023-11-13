@@ -294,6 +294,11 @@ impl Device {
         }
     }
 
+    /// get ptr to pci_dev
+    pub fn as_ptr(&self) -> *mut bindings::pci_dev {
+        self.ptr
+    }
+
     /// iter PCI Resouces
     pub fn iter_resource(&self) -> impl Iterator<Item = Resource> + '_ {
         // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
@@ -321,6 +326,13 @@ impl Device {
         } else {
             Ok(())
         }
+    }
+
+    /// Release selected PCI I/O and memory resources
+    /// This function is called by pci_unregister_driver()
+    pub fn release_selected_regions(&mut self, bars: i32) {
+        // SAFETY: By the type invariants, we know that `self.ptr` is non-null and valid.
+        unsafe { bindings::pci_release_selected_regions(self.ptr, bars) };
     }
 
     /// Get address for accessing the device

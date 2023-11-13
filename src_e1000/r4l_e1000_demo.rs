@@ -9,7 +9,7 @@ use core::sync::atomic::AtomicPtr;
 
 use kernel::pci::Resource;
 use kernel::prelude::*;
-use kernel::sync::Arc;
+use kernel::sync::{Arc, Mutex};
 use kernel::{pci, device, driver, bindings, net, dma, c_str};
 use kernel::device::RawDevice;
 use kernel::sync::SpinLock;
@@ -28,6 +28,7 @@ use e1000_ops::E1000Ops;
 
 use consts::*;
 
+use crate::bindings::free_irq;
 
 module! {
     type: E1000KernelMod,
@@ -141,7 +142,29 @@ impl NetDevice {
 
     }
 
+    /// 释放之前设置的所有TX资源。
+    fn e1000_cleanup_tx_resources(data: &NetDevicePrvData) {
+        let mut tx_ring_guard = data.tx_ring.lock();
+        if let Some(tx_ring) = tx_ring_guard.take() {
+            // 释放TX描述符的DMA空间
+            drop(tx_ring); 
+        }
+    }
 
+    /// 释放之前设置的所有RX资源。
+    fn e1000_cleanup_rx_resources(data: &NetDevicePrvData) {
+        let mut rx_ring_guard = data.rx_ring.lock();
+        if let Some(mut rx_ring) = rx_ring_guard.take() {
+            // 清理与RX描述符相关联的DMA映射和缓冲区
+            for entry in rx_ring.buf.borrow_mut().iter_mut() {
+                if let Some((dma_map, skb)) = entry.take() {
+                    drop(dma_map); 
+                    drop(skb); 
+                }
+            }
+            drop(rx_ring); 
+        }
+    }
 }
 
 #[vtable]
@@ -191,6 +214,14 @@ impl net::DeviceOperations for NetDevice {
 
     fn stop(_dev: &net::Device, _data: &NetDevicePrvData) -> Result {
         pr_info!("Rust for linux e1000 driver demo (net device stop)\n");
+
+        Self::e1000_cleanup_tx_resources(_data);
+        Self::e1000_cleanup_rx_resources(_data);
+
+
+        _data.e1000_hw_ops.e1000_reset_hw();
+
+        _data.napi.disable();
         Ok(())
     }
 
@@ -215,7 +246,7 @@ impl net::DeviceOperations for NetDevice {
         * To WA this issue, pad all small packets manually.
         */
         skb.put_padto(bindings::ETH_ZLEN);
-        
+
         // tell the kernel that we have pended some data to the hardware.
         dev.sent_queue(skb.len());
 
@@ -293,11 +324,23 @@ impl kernel::irq::Handler for E1000InterruptHandler {
 /// the private data for the adapter
 struct E1000DrvPrvData {
     _netdev_reg: net::Registration<NetDevice>,
+    bars:i32,
+    dev_ptr: *mut bindings::pci_dev,
 }
+
+unsafe impl Send for E1000DrvPrvData {}
+unsafe impl Sync for E1000DrvPrvData {}
 
 impl driver::DeviceRemoval for E1000DrvPrvData {
     fn device_remove(&self) {
         pr_info!("Rust for linux e1000 driver demo (device_remove)\n");
+
+        let dev: ARef<net::Device> = self._netdev_reg.dev_get();
+
+        dev.netif_carrier_off();
+        dev.netif_stop_queue();
+
+        drop(&self._netdev_reg);
     }
 }
 
@@ -462,12 +505,25 @@ impl pci::Driver for E1000Drv {
             E1000DrvPrvData{
                 // Must hold this registration, or the device will be removed.
                 _netdev_reg: netdev_reg,
+                bars,
+                dev_ptr: dev.as_ptr(),
             }
         )?)
     }
 
     fn remove(data: &Self::Data) {
         pr_info!("Rust for linux e1000 driver demo (remove)\n");
+        
+        let netdev = data._netdev_reg.dev_get();
+        let bars = data.bars;
+        let pcidev_ptr = data.dev_ptr;
+        let netdev_reg = &data._netdev_reg;
+
+        unsafe { bindings::pci_disable_device(pcidev_ptr) };
+        unsafe { bindings::pci_release_selected_regions(data.dev_ptr, bars) };
+        
+        drop(netdev_reg);
+        drop(data);
     }
 }
 struct E1000KernelMod {
@@ -488,5 +544,7 @@ impl kernel::Module for E1000KernelMod {
 impl Drop for E1000KernelMod {
     fn drop(&mut self) {
         pr_info!("Rust for linux e1000 driver demo (exit)\n");
+
+        drop(&self._dev);
     }
 }
