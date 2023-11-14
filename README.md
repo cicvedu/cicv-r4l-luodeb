@@ -101,18 +101,35 @@ make LLVM=1 menuconfig # <M>Print Helloworld in Rust (NEW)
 
 在设备down的时候，执行这个方法
 ```rust
-fn stop(_dev: &net::Device, _data: &NetDevicePrvData) -> Result {
-    pr_info!("Rust for linux e1000 driver demo (net device stop)\n");
+    fn stop(_dev: &net::Device, _data: &NetDevicePrvData) -> Result {
+        pr_info!("Rust for linux e1000 driver demo (net device stop)\n");
 
-    Self::e1000_cleanup_tx_resources(_data);
-    Self::e1000_cleanup_rx_resources(_data);
+        Self::e1000_cleanup_tx_resources(_data);
+        Self::e1000_cleanup_rx_resources(_data);
 
+        // 获取irq_handler的指针
+        let irq_handler_ptr = _data._irq_handler.load(core::sync::atomic::Ordering::Relaxed);
 
-    _data.e1000_hw_ops.e1000_reset_hw();
+        // 确保指针不为空，然后释放资源
+        if !irq_handler_ptr.is_null() {
+            unsafe {
+                // 将裸指针转换回 `Box`
+                let _irq_handler_box = Box::from_raw(irq_handler_ptr);
+                // 离开作用域时，`_irq_handler_box` 将被丢弃，`drop` 方法将被调用
+            }
 
-    _data.napi.disable();
-    Ok(())
-}
+            // 重置 `AtomicPtr`
+            _data._irq_handler.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Relaxed);
+        }
+
+        _dev.netif_stop_queue();
+        _dev.netif_carrier_off();
+
+        _data.e1000_hw_ops.e1000_reset_hw();
+        _data.napi.disable();
+
+        Ok(())
+    }
 ```
 
 向E1000DrvPrvData中增加字段，使得我们可以保持对pci设备的引用，并将E1000DrvPrvData声明为unsafe
@@ -153,11 +170,21 @@ unsafe impl Sync for E1000DrvPrvData {}
         let pcidev_ptr = data.dev_ptr;
         let netdev_reg = &data._netdev_reg;
 
+        unsafe { bindings::pci_release_selected_regions(pcidev_ptr, bars) };
+        unsafe { bindings::pci_clear_master(pcidev_ptr) };
         unsafe { bindings::pci_disable_device(pcidev_ptr) };
-        unsafe { bindings::pci_release_selected_regions(data.dev_ptr, bars) };
-        
+
         drop(netdev_reg);
         drop(data);
+    }
+```
+
+将E1000DrvPrvData中的netdev_reg字段释放
+```rust
+    fn device_remove(&self) {
+        pr_info!("Rust for linux e1000 driver demo (device_remove)\n");
+
+        drop(&self._netdev_reg);
     }
 ```
 
@@ -180,10 +207,8 @@ insmod r4l_e1000_demo.ko
 ```
 ![](https://imgfiles-debin.oss-cn-hangzhou.aliyuncs.com/md_imgfiles/202311131540697.png)
 
-然后尝试启动设备后停止设备，接着再启动设备，然后配置网卡
+然后尝试启动设备后，配置网卡，正常ping通
 ```bash
-ip link set eth0 up
-ip link set eth0 down
 ip link set eth0 up
 ip addr add broadcast 10.0.2.255 dev eth0
 ip addr add 10.0.2.15/255.255.255.0 dev eth0 
@@ -192,7 +217,18 @@ ping 10.0.2.2
 ```
 ![](https://imgfiles-debin.oss-cn-hangzhou.aliyuncs.com/md_imgfiles/202311131543704.png)
 
-tips:还存在一些问题，在移除模块以后，无法再次唤醒IRQ 11中断，暂时不知道什么问题
+最后移除模块，再重复上面的步骤，也可以正常ping通
+```bash
+rmmod r4l_e1000_demo.ko
+insmod r4l_e1000_demo.ko
+ip link set eth0 up
+ip addr add broadcast 10.0.2.255 dev eth0
+ip addr add 10.0.2.15/255.255.255.0 dev eth0 
+ip route add default via 10.0.2.1
+ping 10.0.2.2
+```
+
+![](https://imgfiles-debin.oss-cn-hangzhou.aliyuncs.com/md_imgfiles/202311150246762.png)
 
 # 作业5 注册字符设备
 
@@ -247,5 +283,6 @@ cat /dev/cicv
 2.它的设备号是248，次设备号0
 
 3.字符设备通过chedrv的`register`方法注册，这个函数将设备号与设备驱动程序关联起来，使得当应用程序打开/dev/cicv设备文件时，内核能够找到正确的驱动程序来处理该设备的操作。
-![](https://imgfiles-debin.oss-cn-hangzhou.aliyuncs.com/md_imgfiles/202311131552771.png)
+
 ```
+![](https://imgfiles-debin.oss-cn-hangzhou.aliyuncs.com/md_imgfiles/202311131552771.png)

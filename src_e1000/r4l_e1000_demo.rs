@@ -355,14 +355,6 @@ impl driver::DeviceRemoval for E1000DrvPrvData {
     fn device_remove(&self) {
         pr_info!("Rust for linux e1000 driver demo (device_remove)\n");
 
-        // let dev: ARef<net::Device> = self._netdev_reg.dev_get();
-
-        // dev.netif_carrier_off();
-        // dev.netif_stop_queue();
-        // let interface = "0000:00:03.0";
-        // let mut c_string = CString::try_from_fmt(fmt!("0000:00:03.0"))?;
-        // unsafe { bindings::free_irq(self.irq, c_string.as_ptr() as *mut c_void) };
-        
         drop(&self._netdev_reg);
     }
 }
