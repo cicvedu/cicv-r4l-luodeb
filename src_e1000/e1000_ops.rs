@@ -119,10 +119,6 @@ impl E1000Ops {
 
     }
 
-    // fn e1000_setup_rctl(&self) {
-
-    // }
-
     fn e1000_configure_rx(&self, rx_ring: &RxRingBuf) -> Result {
         // According to Manual 14.4
 

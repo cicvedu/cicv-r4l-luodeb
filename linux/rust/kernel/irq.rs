@@ -15,6 +15,7 @@ use crate::{
     str::CString,
     types::PointerWrapper,
     Error, Result, ScopeGuard,
+    pr_info,
 };
 use core::{fmt, marker::PhantomData, ops::Deref};
 use macros::vtable;
@@ -431,6 +432,11 @@ impl<H: Handler> Registration<H> {
     }
 }
 
+impl<H: Handler> Drop for Registration<H> {
+    fn drop(&mut self) {
+        drop(&self.0);
+    }
+}
 /// A threaded irq handler.
 pub trait ThreadedHandler {
     /// The context data associated with and made available to the handlers.

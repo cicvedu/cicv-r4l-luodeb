@@ -4,6 +4,7 @@
 
 #![allow(unused)]
 
+use core::ffi::c_void;
 use core::iter::Iterator;
 use core::sync::atomic::AtomicPtr;
 
@@ -14,7 +15,8 @@ use kernel::{pci, device, driver, bindings, net, dma, c_str};
 use kernel::device::RawDevice;
 use kernel::sync::SpinLock;
 
-
+use kernel::str::CString;
+use kernel::PointerWrapper;
 
 mod consts;
 mod hw_defs;
@@ -218,10 +220,27 @@ impl net::DeviceOperations for NetDevice {
         Self::e1000_cleanup_tx_resources(_data);
         Self::e1000_cleanup_rx_resources(_data);
 
+        // 获取irq_handler的指针
+        let irq_handler_ptr = _data._irq_handler.load(core::sync::atomic::Ordering::Relaxed);
+
+        // 确保指针不为空，然后释放资源
+        if !irq_handler_ptr.is_null() {
+            unsafe {
+                // 将裸指针转换回 `Box`
+                let _irq_handler_box = Box::from_raw(irq_handler_ptr);
+                // 离开作用域时，`_irq_handler_box` 将被丢弃，`drop` 方法将被调用
+            }
+
+            // 重置 `AtomicPtr`
+            _data._irq_handler.store(core::ptr::null_mut(), core::sync::atomic::Ordering::Relaxed);
+        }
+
+        _dev.netif_stop_queue();
+        _dev.netif_carrier_off();
 
         _data.e1000_hw_ops.e1000_reset_hw();
-
         _data.napi.disable();
+
         Ok(())
     }
 
@@ -326,6 +345,7 @@ struct E1000DrvPrvData {
     _netdev_reg: net::Registration<NetDevice>,
     bars:i32,
     dev_ptr: *mut bindings::pci_dev,
+    irq: u32,
 }
 
 unsafe impl Send for E1000DrvPrvData {}
@@ -335,11 +355,14 @@ impl driver::DeviceRemoval for E1000DrvPrvData {
     fn device_remove(&self) {
         pr_info!("Rust for linux e1000 driver demo (device_remove)\n");
 
-        let dev: ARef<net::Device> = self._netdev_reg.dev_get();
+        // let dev: ARef<net::Device> = self._netdev_reg.dev_get();
 
-        dev.netif_carrier_off();
-        dev.netif_stop_queue();
-
+        // dev.netif_carrier_off();
+        // dev.netif_stop_queue();
+        // let interface = "0000:00:03.0";
+        // let mut c_string = CString::try_from_fmt(fmt!("0000:00:03.0"))?;
+        // unsafe { bindings::free_irq(self.irq, c_string.as_ptr() as *mut c_void) };
+        
         drop(&self._netdev_reg);
     }
 }
@@ -507,6 +530,7 @@ impl pci::Driver for E1000Drv {
                 _netdev_reg: netdev_reg,
                 bars,
                 dev_ptr: dev.as_ptr(),
+                irq,
             }
         )?)
     }
@@ -519,9 +543,10 @@ impl pci::Driver for E1000Drv {
         let pcidev_ptr = data.dev_ptr;
         let netdev_reg = &data._netdev_reg;
 
+        unsafe { bindings::pci_release_selected_regions(pcidev_ptr, bars) };
+        unsafe { bindings::pci_clear_master(pcidev_ptr) };
         unsafe { bindings::pci_disable_device(pcidev_ptr) };
-        unsafe { bindings::pci_release_selected_regions(data.dev_ptr, bars) };
-        
+
         drop(netdev_reg);
         drop(data);
     }
